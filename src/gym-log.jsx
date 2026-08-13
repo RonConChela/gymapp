@@ -800,7 +800,7 @@ const styles = {
   },
   main: {
     padding: "14px 12px 0",
-    paddingTop: "125px",
+    paddingTop: "150px",
 },
   emptyState: { padding: "36px 8px", textAlign: "center" },
   emptyBar: { width: "36px", height: "3px", background: "#E8C547", margin: "0 auto 16px", borderRadius: "2px" },
