@@ -215,8 +215,10 @@ export default function GymLog() {
       <div style={styles.topBar}>
         <header style={styles.header}>
           <div style={styles.headerRow}>
-            <Dumbbell size={22} color="#E8C547" strokeWidth={2.2} />
-            <span style={styles.headerTitle}>RUTINA</span>
+            <span style={styles.logoBadge}>
+              <span>RUTINA</span>
+              <Dumbbell size={17} color="#16171A" strokeWidth={2.5} />
+            </span>
           </div>
           {saveError && <span style={styles.saveError}>sin conexión — no se guardó</span>}
         </header>
@@ -746,9 +748,23 @@ const styles = {
     letterSpacing: "2px",
     fontSize: "13px",
   },
-  header: { padding: "12px 14px 10px" },
+  header: { padding: "14px 12px 10px" },
   headerRow: { display: "flex", alignItems: "center", gap: "9px" },
-  headerTitle: { fontSize: "21px", fontWeight: 700, letterSpacing: "2.8px" },
+  logoBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "7px",
+    background: "#E8C547",
+    color: "#16171A",
+    fontFamily: "'JetBrains Mono', monospace",
+    fontWeight: 700,
+    fontSize: "14.5px",
+    letterSpacing: "1.5px",
+    padding: "7px 11px",
+    borderRadius: "6px",
+    lineHeight: 1,
+    border: "1px solid #E8C547",
+  },
   saveError: {
     display: "block",
     marginTop: "5px",
