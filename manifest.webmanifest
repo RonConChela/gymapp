@@ -1,8 +1,8 @@
 {
   "name": "RUTINA",
   "short_name": "RUTINA",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "/gymapp/",
+  "scope": "/gymapp/",
   "display": "standalone",
   "background_color": "#16171A",
   "theme_color": "#16171A",
