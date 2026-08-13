@@ -206,6 +206,7 @@ export default function GymLog() {
         @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
         * { box-sizing: border-box; }
         ::selection { background: #E8C547; color: #16171A; }
+        input, textarea, select { font-size: 16px !important; }
         input:focus, textarea:focus { outline: 2px solid #E8C547; outline-offset: 1px; }
         button:focus-visible { outline: 2px solid #E8C547; outline-offset: 2px; }
         input[type="date"] { color-scheme: dark; }
