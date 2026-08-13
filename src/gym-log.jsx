@@ -212,33 +212,35 @@ export default function GymLog() {
         textarea { resize: none; }
       `}</style>
 
-      <header style={styles.header}>
-        <div style={styles.headerRow}>
-          <Dumbbell size={20} color="#E8C547" strokeWidth={2.2} />
-          <span style={styles.headerTitle}>RUTINA</span>
-        </div>
-        {saveError && <span style={styles.saveError}>sin conexión — no se guardó</span>}
-      </header>
+      <div style={styles.topBar}>
+        <header style={styles.header}>
+          <div style={styles.headerRow}>
+            <Dumbbell size={22} color="#E8C547" strokeWidth={2.2} />
+            <span style={styles.headerTitle}>RUTINA</span>
+          </div>
+          {saveError && <span style={styles.saveError}>sin conexión — no se guardó</span>}
+        </header>
 
-      <nav style={styles.dayNav}>
-        {DAYS.map((d, i) => {
-          const active = d === activeDay;
-          return (
-            <button
-              key={d}
-              onClick={() => setActiveDay(d)}
-              style={{
-                ...styles.dayBtn,
-                background: active ? "#E8C547" : "transparent",
-                color: active ? "#16171A" : "#8A8D93",
-                borderColor: active ? "#E8C547" : "#2B2D31",
-              }}
-            >
-              {DAY_SHORT[i]}
-            </button>
-          );
-        })}
-      </nav>
+        <nav style={styles.dayNav}>
+          {DAYS.map((d, i) => {
+            const active = d === activeDay;
+            return (
+              <button
+                key={d}
+                onClick={() => setActiveDay(d)}
+                style={{
+                  ...styles.dayBtn,
+                  background: active ? "#E8C547" : "transparent",
+                  color: active ? "#16171A" : "#8A8D93",
+                  borderColor: active ? "#E8C547" : "#2B2D31",
+                }}
+              >
+                {DAY_SHORT[i]}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
 
       <main style={styles.main}>
         {exercises.length === 0 && !addingExercise && (
@@ -744,9 +746,9 @@ const styles = {
     letterSpacing: "2px",
     fontSize: "13px",
   },
-  header: { padding: "16px 14px 12px", borderBottom: "1px solid #232529" },
-  headerRow: { display: "flex", alignItems: "center", gap: "8px" },
-  headerTitle: { fontSize: "19px", fontWeight: 700, letterSpacing: "2.5px" },
+  header: { padding: "12px 14px 10px" },
+  headerRow: { display: "flex", alignItems: "center", gap: "9px" },
+  headerTitle: { fontSize: "21px", fontWeight: 700, letterSpacing: "2.8px" },
   saveError: {
     display: "block",
     marginTop: "5px",
@@ -755,7 +757,15 @@ const styles = {
     color: "#C4664B",
     letterSpacing: "0.3px",
   },
-  dayNav: { display: "flex", gap: "4px", padding: "10px 8px", borderBottom: "1px solid #232529" },
+  topBar: {
+    position: "sticky",
+    top: 0,
+    zIndex: 20,
+    background: "#16171A",
+    paddingTop: "env(safe-area-inset-top)",
+    borderBottom: "1px solid #232529",
+  },
+  dayNav: { display: "flex", gap: "4px", padding: "0 8px 10px" },
   dayBtn: {
     flex: 1,
     padding: "8px 2px",
