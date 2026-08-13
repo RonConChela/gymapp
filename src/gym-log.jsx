@@ -515,7 +515,8 @@ function ExerciseCard({
               {["kg", "lb"].map((u) => (
                 <button
                   key={u}
-                  onClick={() => setTargetDraft({ ...targetDraft, unit: u })}
+                  onPointerDown={(e) => e.preventDefault()}
+ 		   onClick={() => setTargetDraft({ ...targetDraft, unit: u })}
                   style={{
                     ...styles.unitToggleBtnSmall,
                     background: targetDraft.unit === u ? "#E8C547" : "transparent",
@@ -775,8 +776,10 @@ const styles = {
     letterSpacing: "0.3px",
   },
   topBar: {
-    position: "sticky",
+    position: "fixed",
     top: 0,
+    left: 0,
+    right: 0,
     zIndex: 20,
     background: "#16171A",
     paddingTop: "env(safe-area-inset-top)",
@@ -795,7 +798,10 @@ const styles = {
     cursor: "pointer",
     transition: "all 0.15s ease",
   },
-  main: { padding: "14px 12px 0" },
+  main: {
+    padding: "14px 12px 0",
+    paddingTop: "108px",
+},
   emptyState: { padding: "36px 8px", textAlign: "center" },
   emptyBar: { width: "36px", height: "3px", background: "#E8C547", margin: "0 auto 16px", borderRadius: "2px" },
   emptyText: { color: "#6B6E74", fontSize: "14px", fontFamily: "'Oswald', sans-serif", fontWeight: 400, margin: 0 },
