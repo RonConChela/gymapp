@@ -1,13 +1,40 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Plus, X, Dumbbell, ChevronRight, ChevronDown, ChevronUp,
-  Check, Trash2, Pencil, Star, TrendingUp, TrendingDown, Minus,
+  Check, Trash2, Pencil, Star, TrendingUp, TrendingDown, Minus, Flame,
 } from "lucide-react";
 
 const DAYS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"];
 const DAY_SHORT = ["LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB", "DOM"];
 const STORAGE_KEY = "gym-log-data-v6";
+const HIDDEN_DAYS_KEY = "gym-log-hidden-days-v1";
 const VISIBLE_COUNT = 4;
+
+// System font stack — renders as San Francisco on iOS/macOS automatically,
+// no network fetch, no flash of unstyled text, works offline as a PWA.
+const FONT_UI =
+  '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif';
+const FONT_NUM = FONT_UI; // numeric displays use the same face with tabular-nums for alignment
+
+// ---- design tokens (single source of truth for the visual system) ----
+const C = {
+  bg: "#000000",
+  card: "#1C1C1E",
+  cardElevated: "#2C2C2E",
+  inset: "#0D0D0F",
+  borderSubtle: "rgba(255,255,255,0.08)",
+  border: "rgba(255,255,255,0.12)",
+  borderStrong: "rgba(255,255,255,0.18)",
+  textPrimary: "#F5F5F7",
+  textSecondary: "rgba(235,235,245,0.6)",
+  textMuted: "rgba(235,235,245,0.35)",
+  gold: "#E8C547",
+  goldTint: "rgba(232,197,71,0.16)",
+  goldText: "#16171A",
+  cyan: "#64D2FF",
+  danger: "#FF6B5B",
+  success: "#32D74B",
+};
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -25,6 +52,33 @@ function isoToday() {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function dateToISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// 0=Lunes ... 6=Domingo, matching the DAYS array order
+function mondayBasedIndex(d) {
+  const jsDay = d.getDay();
+  return jsDay === 0 ? 6 : jsDay - 1;
+}
+
+// Returns the calendar date that corresponds to a given weekday (DAYS index) within the current week
+function thisWeekDateFor(dayIndex) {
+  const today = new Date();
+  const todayIdx = mondayBasedIndex(today);
+  const d = new Date(today);
+  d.setDate(d.getDate() + (dayIndex - todayIdx));
+  return d;
+}
+
+// Did the given day-bucket (by weekday name) have any logged set on the given ISO date?
+function trainedOn(exercisesForDay, iso) {
+  return exercisesForDay.some((ex) => ex.logs.some((l) => l.date === iso));
 }
 
 function formatDate(iso) {
@@ -47,20 +101,57 @@ function entryMaxWeight(entry) {
   return Math.max(...vals);
 }
 
+// Keeps the page from jumping when the iOS keyboard closes after a save.
+function preserveScroll(action) {
+  const y = window.scrollY;
+  action();
+  const restore = () => window.scrollTo(0, y);
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+  setTimeout(restore, 350);
+}
+
+const emptyForm = { mode: null, id: null, name: "", weight: "", reps: "", sets: "", unit: "kg" };
+
+// Walks backward day by day. A "training day" is any weekday bucket that has
+// exercises and isn't hidden as a rest day. Counts consecutive trained days,
+// skipping rest days silently, breaking on the first missed training day.
+function computeStreak(routine, hiddenDays) {
+  let streak = 0;
+  const todayIdx = mondayBasedIndex(new Date());
+  const todayName = DAYS[todayIdx];
+  const todayISO = isoToday();
+  const todayExs = routine[todayName] || [];
+  const todayIsTrainingDay = todayExs.length > 0 && !hiddenDays.includes(todayName);
+  if (todayIsTrainingDay && trainedOn(todayExs, todayISO)) streak++;
+
+  const cursor = new Date();
+  cursor.setDate(cursor.getDate() - 1);
+  for (let i = 0; i < 90; i++) {
+    const dName = DAYS[mondayBasedIndex(cursor)];
+    const exs = routine[dName] || [];
+    const isTrainingDay = exs.length > 0 && !hiddenDays.includes(dName);
+    if (isTrainingDay) {
+      if (trainedOn(exs, dateToISO(cursor))) streak++;
+      else break;
+    }
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
 export default function GymLog() {
   const [routine, setRoutine] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState(false);
   const [activeDay, setActiveDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
-  const [addingExercise, setAddingExercise] = useState(false);
-  const [newExerciseName, setNewExerciseName] = useState("");
-  const [newExerciseUnit, setNewExerciseUnit] = useState("kg");
+  const [hiddenDays, setHiddenDays] = useState([]);
+  const [editingDays, setEditingDays] = useState(false);
   const [logDrafts, setLogDrafts] = useState({});
   const [openLogFor, setOpenLogFor] = useState(null);
-  const [editingTarget, setEditingTarget] = useState(null);
-  const [targetDraft, setTargetDraft] = useState({ weight: "", reps: "", sets: "", unit: "kg" });
+  const [exerciseForm, setExerciseForm] = useState(null); // { mode: 'create'|'edit', id, name, weight, reps, sets, unit }
   const nameInputRef = useRef(null);
 
+  // ---- load routine (unchanged storage key/logic) ----
   useEffect(() => {
     (async () => {
       try {
@@ -74,9 +165,39 @@ export default function GymLog() {
     })();
   }, []);
 
+  // ---- load hidden-days preference (separate key, independent of routine data) ----
   useEffect(() => {
-    if (addingExercise && nameInputRef.current) nameInputRef.current.focus();
-  }, [addingExercise]);
+    (async () => {
+      try {
+        const result = await window.storage.get(HIDDEN_DAYS_KEY);
+        setHiddenDays(result ? JSON.parse(result.value) : []);
+      } catch (e) {
+        setHiddenDays([]);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (exerciseForm && exerciseForm.mode && nameInputRef.current) {
+      nameInputRef.current.focus();
+    }
+  }, [exerciseForm && exerciseForm.mode, exerciseForm && exerciseForm.id]);
+
+  // Fix: close any open "new exercise" / "edit exercise" form when switching days,
+  // so a half-filled form never silently follows you to a different day.
+  useEffect(() => {
+    setExerciseForm(null);
+    setOpenLogFor(null);
+  }, [activeDay]);
+
+  // Safety: if the active day was hidden in a previous session, jump to a visible one.
+  useEffect(() => {
+    if (editingDays) return;
+    const visible = DAYS.filter((d) => !hiddenDays.includes(d));
+    if (visible.length && !visible.includes(activeDay)) {
+      setActiveDay(visible[0]);
+    }
+  }, [hiddenDays, editingDays]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function persist(next) {
     setRoutine(next);
@@ -89,23 +210,30 @@ export default function GymLog() {
     }
   }
 
-  function addExercise() {
-    const name = newExerciseName.trim();
-    if (!name) {
-      setAddingExercise(false);
+  async function persistHiddenDays(next) {
+    setHiddenDays(next);
+    try {
+      await window.storage.set(HIDDEN_DAYS_KEY, JSON.stringify(next));
+    } catch (e) {
+      // non-critical: worst case the visibility choice doesn't persist
+    }
+  }
+
+  function toggleDayVisibility(day) {
+    const isHidden = hiddenDays.includes(day);
+    if (isHidden) {
+      persistHiddenDays(hiddenDays.filter((d) => d !== day));
       return;
     }
-    const next = {
-      ...routine,
-      [activeDay]: [
-        ...routine[activeDay],
-        { id: uid(), name, unit: newExerciseUnit, targetWeight: "", targetReps: "", targetSets: "", logs: [] },
-      ],
-    };
-    persist(next);
-    setNewExerciseName("");
-    setNewExerciseUnit("kg");
-    setAddingExercise(false);
+    // never allow hiding the last visible day
+    const currentlyVisible = DAYS.length - hiddenDays.length;
+    if (currentlyVisible <= 1) return;
+    const next = [...hiddenDays, day];
+    persistHiddenDays(next);
+    if (day === activeDay) {
+      const remaining = DAYS.filter((d) => !next.includes(d));
+      if (remaining.length) setActiveDay(remaining[0]);
+    }
   }
 
   function deleteExercise(id) {
@@ -122,23 +250,67 @@ export default function GymLog() {
     persist({ ...routine, [activeDay]: list });
   }
 
-  function saveTarget(id) {
-    const next = {
-      ...routine,
-      [activeDay]: routine[activeDay].map((e) =>
-        e.id === id
-          ? {
-              ...e,
-              targetWeight: targetDraft.weight,
-              targetReps: targetDraft.reps,
-              targetSets: targetDraft.sets,
-              unit: targetDraft.unit,
-            }
-          : e
-      ),
-    };
-    persist(next);
-    setEditingTarget(null);
+  // ---- unified create/edit exercise form (name + target together) ----
+  function openCreateForm() {
+    setExerciseForm({ ...emptyForm, mode: "create" });
+  }
+  function openEditForm(ex) {
+    setExerciseForm({
+      mode: "edit",
+      id: ex.id,
+      name: ex.name,
+      weight: ex.targetWeight || "",
+      reps: ex.targetReps || "",
+      sets: ex.targetSets || "",
+      unit: ex.unit || "kg",
+    });
+  }
+  function closeExerciseForm() {
+    setExerciseForm(null);
+  }
+  function saveExerciseForm() {
+    if (!exerciseForm) return;
+    const name = exerciseForm.name.trim();
+    if (!name) {
+      closeExerciseForm();
+      return;
+    }
+    if (exerciseForm.mode === "create") {
+      const next = {
+        ...routine,
+        [activeDay]: [
+          ...routine[activeDay],
+          {
+            id: uid(),
+            name,
+            unit: exerciseForm.unit,
+            targetWeight: exerciseForm.weight,
+            targetReps: exerciseForm.reps,
+            targetSets: exerciseForm.sets,
+            logs: [],
+          },
+        ],
+      };
+      persist(next);
+    } else {
+      const next = {
+        ...routine,
+        [activeDay]: routine[activeDay].map((e) =>
+          e.id === exerciseForm.id
+            ? {
+                ...e,
+                name,
+                unit: exerciseForm.unit,
+                targetWeight: exerciseForm.weight,
+                targetReps: exerciseForm.reps,
+                targetSets: exerciseForm.sets,
+              }
+            : e
+        ),
+      };
+      persist(next);
+    }
+    closeExerciseForm();
   }
 
   function openLog(ex) {
@@ -190,6 +362,8 @@ export default function GymLog() {
     persist(next);
   }
 
+  const streak = useMemo(() => (routine ? computeStreak(routine, hiddenDays) : 0), [routine, hiddenDays]);
+
   if (loading) {
     return (
       <div style={styles.page}>
@@ -199,18 +373,24 @@ export default function GymLog() {
   }
 
   const exercises = routine[activeDay] || [];
+  const visibleDays = DAYS.filter((d) => !hiddenDays.includes(d));
+  const daysToRender = editingDays ? DAYS : visibleDays;
+  const todayISO = isoToday();
 
   return (
     <div style={styles.page}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
-        * { box-sizing: border-box; }
-        ::selection { background: #E8C547; color: #16171A; }
-        input, textarea, select { font-size: 16px !important; }
-        input:focus, textarea:focus { outline: 2px solid #E8C547; outline-offset: 1px; }
-        button:focus-visible { outline: 2px solid #E8C547; outline-offset: 2px; }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        html, body { background: ${C.bg}; }
+        ::selection { background: ${C.gold}; color: ${C.bg}; }
+        input:focus, textarea:focus { outline: 2px solid ${C.gold}; outline-offset: 1px; }
+        button:focus-visible { outline: 2px solid ${C.gold}; outline-offset: 2px; }
         input[type="date"] { color-scheme: dark; }
         textarea { resize: none; }
+        button { transition: transform 0.08s ease, opacity 0.08s ease, background-color 0.15s ease, border-color 0.15s ease; -webkit-font-smoothing: antialiased; }
+        button:active { transform: scale(0.96); opacity: 0.8; }
+        button:disabled:active { transform: none; opacity: inherit; }
+        .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
       `}</style>
 
       <div style={styles.topBar}>
@@ -218,35 +398,85 @@ export default function GymLog() {
           <div style={styles.headerRow}>
             <span style={styles.logoBadge}>
               <span>RUTINA</span>
-              <Dumbbell size={17} color="#16171A" strokeWidth={2.5} />
+              <Dumbbell size={15} color={C.goldText} strokeWidth={2.5} />
             </span>
+            {streak > 0 && (
+              <span style={styles.streakBadge}>
+                <Flame size={13} color={C.gold} strokeWidth={2.5} />
+                <span className="tnum">{streak}</span>
+              </span>
+            )}
           </div>
           {saveError && <span style={styles.saveError}>sin conexión — no se guardó</span>}
         </header>
 
-        <nav style={styles.dayNav}>
-          {DAYS.map((d, i) => {
-            const active = d === activeDay;
+        <nav style={styles.dayNavWrap}>
+          <div style={styles.dayNavTrack}>
+            {daysToRender.map((d) => {
+            const dayIdx = DAYS.indexOf(d);
+            const isHidden = hiddenDays.includes(d);
+            const active = d === activeDay && !editingDays;
+
+            let dayState = "future"; // future | trained | missed
+            if (!editingDays) {
+              const exsForDay = routine[d] || [];
+              if (exsForDay.length > 0 && !isHidden) {
+                const targetISO = dateToISO(thisWeekDateFor(dayIdx));
+                if (targetISO < todayISO) {
+                  dayState = trainedOn(exsForDay, targetISO) ? "trained" : "missed";
+                }
+              }
+            }
+
+            let bg = "transparent";
+            let color = C.textSecondary;
+            let opacity = 1;
+            if (active) {
+              bg = C.gold;
+              color = C.goldText;
+            } else if (editingDays && isHidden) {
+              color = C.textMuted;
+              opacity = 0.4;
+            } else if (dayState === "trained") {
+              bg = C.goldTint;
+              color = C.gold;
+            } else if (dayState === "missed") {
+              bg = "rgba(0,0,0,0.35)";
+              color = C.textMuted;
+            }
+
             return (
               <button
                 key={d}
-                onClick={() => setActiveDay(d)}
+                onClick={() => (editingDays ? toggleDayVisibility(d) : setActiveDay(d))}
                 style={{
                   ...styles.dayBtn,
-                  background: active ? "#E8C547" : "transparent",
-                  color: active ? "#16171A" : "#8A8D93",
-                  borderColor: active ? "#E8C547" : "#2B2D31",
+                  background: bg,
+                  color,
+                  opacity,
+                  textDecoration: editingDays && isHidden ? "line-through" : "none",
                 }}
               >
-                {DAY_SHORT[i]}
+                {DAY_SHORT[dayIdx]}
               </button>
             );
           })}
+          </div>
+          <button
+            onClick={() => setEditingDays((v) => !v)}
+            style={styles.editDaysBtn}
+            aria-label="Editar días visibles"
+          >
+            {editingDays ? <Check size={15} color={C.gold} /> : <Pencil size={13} color={C.textMuted} />}
+          </button>
         </nav>
+        {editingDays && (
+          <p style={styles.editDaysHint}>Toca un día para mostrarlo u ocultarlo (ej. tu día de descanso).</p>
+        )}
       </div>
 
       <main style={styles.main}>
-        {exercises.length === 0 && !addingExercise && (
+        {exercises.length === 0 && exerciseForm?.mode !== "create" && (
           <div style={styles.emptyState}>
             <div style={styles.emptyBar} />
             <p style={styles.emptyText}>
@@ -263,88 +493,111 @@ export default function GymLog() {
             isLast={i === exercises.length - 1}
             onMoveUp={() => moveExercise(ex.id, -1)}
             onMoveDown={() => moveExercise(ex.id, 1)}
-            isEditingTarget={editingTarget === ex.id}
-            targetDraft={targetDraft}
-            setTargetDraft={setTargetDraft}
-            onEditTarget={() => {
-              setEditingTarget(ex.id);
-              setTargetDraft({
-                weight: ex.targetWeight,
-                reps: ex.targetReps,
-                sets: ex.targetSets || "",
-                unit: ex.unit || "kg",
-              });
-            }}
-            onCancelTarget={() => setEditingTarget(null)}
-            onSaveTarget={() => saveTarget(ex.id)}
             onDelete={() => deleteExercise(ex.id)}
+            isEditingThis={exerciseForm?.mode === "edit" && exerciseForm.id === ex.id}
+            formValue={exerciseForm}
+            onFormChange={setExerciseForm}
+            onOpenEdit={() => openEditForm(ex)}
+            onSaveForm={() => preserveScroll(saveExerciseForm)}
+            onCancelForm={closeExerciseForm}
+            nameInputRef={nameInputRef}
             openLog={openLogFor === ex.id}
             onToggleLog={() => openLog(ex)}
             draft={logDrafts[ex.id]}
             onDraftChange={(updater) => updateDraft(ex.id, updater)}
-            onSaveNewLog={() => saveNewLog(ex.id)}
+            onSaveNewLog={() => preserveScroll(() => saveNewLog(ex.id))}
             onDeleteLog={(idx) => deleteLog(ex.id, idx)}
             onUpdateLog={(idx, updated) => updateLog(ex.id, idx, updated)}
           />
         ))}
 
-        {addingExercise ? (
-          <div style={styles.addBlock}>
-            <div style={styles.addRow}>
-              <input
-                ref={nameInputRef}
-                value={newExerciseName}
-                onChange={(e) => setNewExerciseName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") addExercise();
-                  if (e.key === "Escape") {
-                    setAddingExercise(false);
-                    setNewExerciseName("");
-                  }
-                }}
-                placeholder="Nombre del ejercicio…"
-                style={styles.addInput}
-              />
-              <button onClick={addExercise} style={styles.iconBtnYellow}>
-                <Check size={18} strokeWidth={2.5} />
-              </button>
-              <button
-                onClick={() => {
-                  setAddingExercise(false);
-                  setNewExerciseName("");
-                }}
-                style={styles.iconBtnGhost}
-              >
-                <X size={18} strokeWidth={2.5} />
-              </button>
-            </div>
-            <div style={styles.unitPicker}>
-              <span style={styles.unitPickerLabel}>UNIDAD</span>
-              <div style={styles.unitToggle}>
-                {["kg", "lb"].map((u) => (
-                  <button
-                    key={u}
-                    onClick={() => setNewExerciseUnit(u)}
-                    style={{
-                      ...styles.unitToggleBtn,
-                      background: newExerciseUnit === u ? "#E8C547" : "transparent",
-                      color: newExerciseUnit === u ? "#16171A" : "#8A8D93",
-                    }}
-                  >
-                    {u}
-                  </button>
-                ))}
-              </div>
-            </div>
+        {exerciseForm?.mode === "create" ? (
+          <div style={styles.exerciseFormBlock}>
+            <ExerciseForm
+              value={exerciseForm}
+              onChange={setExerciseForm}
+              onSave={() => preserveScroll(saveExerciseForm)}
+              onCancel={closeExerciseForm}
+              nameInputRef={nameInputRef}
+            />
           </div>
         ) : (
-          <button onClick={() => setAddingExercise(true)} style={styles.addExerciseBtn}>
+          <button onClick={openCreateForm} style={styles.addExerciseBtn}>
             <Plus size={18} strokeWidth={2.5} />
             <span>Anotar ejercicio</span>
           </button>
         )}
       </main>
     </div>
+  );
+}
+
+// Shared name + target(+unit) form, used both to create a new exercise
+// and to edit an existing one's name/objective in a single step.
+function ExerciseForm({ value, onChange, onSave, onCancel, nameInputRef }) {
+  return (
+    <>
+      <input
+        ref={nameInputRef}
+        value={value.name}
+        onChange={(e) => onChange({ ...value, name: e.target.value })}
+        placeholder="Nombre del ejercicio…"
+        style={styles.formNameInput}
+      />
+      <div style={styles.formTargetRow}>
+        <input
+          value={value.weight}
+          onChange={(e) => onChange({ ...value, weight: e.target.value })}
+          placeholder={value.unit}
+          inputMode="decimal"
+          style={styles.formNumInput}
+        />
+        <span style={styles.targetSep}>×</span>
+        <input
+          value={value.reps}
+          onChange={(e) => onChange({ ...value, reps: e.target.value })}
+          placeholder="reps"
+          inputMode="numeric"
+          style={styles.formNumInput}
+        />
+        <span style={styles.targetSep}>×</span>
+        <input
+          value={value.sets}
+          onChange={(e) => onChange({ ...value, sets: e.target.value })}
+          placeholder="series"
+          inputMode="numeric"
+          style={styles.formNumInput}
+        />
+      </div>
+      <div style={styles.formFooter}>
+        <div style={styles.unitToggle}>
+          {["kg", "lb"].map((u) => (
+            <button
+              key={u}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onChange({ ...value, unit: u })}
+              style={{
+                ...styles.unitToggleBtn,
+                background: value.unit === u ? C.gold : "transparent",
+                color: value.unit === u ? C.goldText : C.textSecondary,
+              }}
+            >
+              {u}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button onClick={onSave} style={styles.btnPrimary}>
+            <Check size={16} strokeWidth={2.5} />
+            <span>Guardar</span>
+          </button>
+          <button onClick={onCancel} style={styles.btnGhost}>
+            <X size={17} strokeWidth={2.5} />
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -371,7 +624,7 @@ function SetRows({ sets, onChange, unit }) {
             inputMode="decimal"
             style={styles.setInput}
           />
-          <span style={styles.targetX}>×</span>
+          <span style={styles.targetSep}>×</span>
           <input
             value={s.reps}
             onChange={(e) => updateSet(i, "reps", e.target.value)}
@@ -381,13 +634,13 @@ function SetRows({ sets, onChange, unit }) {
           />
           {sets.length > 1 && (
             <button onClick={() => removeSet(i)} style={styles.setRemoveBtn} aria-label="Quitar serie">
-              <X size={12} strokeWidth={2.5} />
+              <X size={13} strokeWidth={2.5} />
             </button>
           )}
         </div>
       ))}
       <button onClick={addSet} style={styles.addSetBtn}>
-        <Plus size={13} strokeWidth={2.5} />
+        <Plus size={14} strokeWidth={2.5} />
         <span>Serie</span>
       </button>
     </div>
@@ -395,9 +648,9 @@ function SetRows({ sets, onChange, unit }) {
 }
 
 function TrendIcon({ trend }) {
-  if (trend === "up") return <TrendingUp size={12} color="#7CC576" strokeWidth={2.5} />;
-  if (trend === "down") return <TrendingDown size={12} color="#C4664B" strokeWidth={2.5} />;
-  if (trend === "same") return <Minus size={12} color="#5A5D63" strokeWidth={2.5} />;
+  if (trend === "up") return <TrendingUp size={12} color={C.success} strokeWidth={2.5} />;
+  if (trend === "down") return <TrendingDown size={12} color={C.danger} strokeWidth={2.5} />;
+  if (trend === "same") return <Minus size={12} color={C.textMuted} strokeWidth={2.5} />;
   return null;
 }
 
@@ -407,13 +660,14 @@ function ExerciseCard({
   isLast,
   onMoveUp,
   onMoveDown,
-  isEditingTarget,
-  targetDraft,
-  setTargetDraft,
-  onEditTarget,
-  onCancelTarget,
-  onSaveTarget,
   onDelete,
+  isEditingThis,
+  formValue,
+  onFormChange,
+  onOpenEdit,
+  onSaveForm,
+  onCancelForm,
+  nameInputRef,
   openLog,
   onToggleLog,
   draft,
@@ -443,10 +697,8 @@ function ExerciseCard({
 
   function trendFor(idx) {
     if (idx === 0) return null;
-    const prevEntry = ex.logs[idx - 1];
-    const curEntry = ex.logs[idx];
-    const prevMax = entryMaxWeight(prevEntry);
-    const curMax = entryMaxWeight(curEntry);
+    const prevMax = entryMaxWeight(ex.logs[idx - 1]);
+    const curMax = entryMaxWeight(ex.logs[idx]);
     if (prevMax === null || curMax === null) return null;
     if (curMax > prevMax) return "up";
     if (curMax < prevMax) return "down";
@@ -466,92 +718,50 @@ function ExerciseCard({
     setExpandedLogIdx(null);
   }
 
+  if (isEditingThis) {
+    return (
+      <div style={styles.card}>
+        <div style={styles.exerciseFormBlockInline}>
+          <ExerciseForm value={formValue} onChange={onFormChange} onSave={onSaveForm} onCancel={onCancelForm} nameInputRef={nameInputRef} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.card}>
       <div style={styles.cardTop}>
-        <span style={styles.exName}>{ex.name}</span>
-        <div style={{ display: "flex", gap: "3px" }}>
-          <button onClick={onMoveUp} disabled={isFirst} style={{ ...styles.reorderBtn, opacity: isFirst ? 0.3 : 1 }} aria-label="Subir">
+        <button onClick={onOpenEdit} style={styles.exNameBtn}>
+          <span style={styles.exName}>{ex.name}</span>
+          <Pencil size={11} color={C.textMuted} />
+        </button>
+        <div style={styles.actionGroup}>
+          <button onClick={onMoveUp} disabled={isFirst} style={{ ...styles.actionBtn, opacity: isFirst ? 0.3 : 1 }} aria-label="Subir">
             <ChevronUp size={14} />
           </button>
-          <button onClick={onMoveDown} disabled={isLast} style={{ ...styles.reorderBtn, opacity: isLast ? 0.3 : 1 }} aria-label="Bajar">
+          <button onClick={onMoveDown} disabled={isLast} style={{ ...styles.actionBtn, opacity: isLast ? 0.3 : 1 }} aria-label="Bajar">
             <ChevronDown size={14} />
           </button>
-          <button onClick={onDelete} style={styles.deleteBtn} aria-label="Eliminar ejercicio">
-            <Trash2 size={15} color="#5A5D63" />
+          <button onClick={onDelete} style={styles.actionBtn} aria-label="Eliminar ejercicio">
+            <Trash2 size={14} color={C.danger} />
           </button>
         </div>
       </div>
 
-      {isEditingTarget ? (
-        <div style={styles.targetEditBlock}>
-          <div style={styles.targetEditRow}>
-            <input
-              value={targetDraft.weight}
-              onChange={(e) => setTargetDraft({ ...targetDraft, weight: e.target.value })}
-              placeholder={targetDraft.unit}
-              inputMode="decimal"
-              style={styles.targetInput}
-            />
-            <span style={styles.targetX}>×</span>
-            <input
-              value={targetDraft.reps}
-              onChange={(e) => setTargetDraft({ ...targetDraft, reps: e.target.value })}
-              placeholder="reps"
-              inputMode="numeric"
-              style={styles.targetInput}
-            />
-            <span style={styles.targetX}>×</span>
-            <input
-              value={targetDraft.sets}
-              onChange={(e) => setTargetDraft({ ...targetDraft, sets: e.target.value })}
-              placeholder="series"
-              inputMode="numeric"
-              style={styles.targetInput}
-            />
-          </div>
-          <div style={styles.targetEditFooter}>
-            <div style={styles.unitToggleSmall}>
-              {["kg", "lb"].map((u) => (
-                <button
-                  key={u}
-                  onPointerDown={(e) => e.preventDefault()}
- 		   onClick={() => setTargetDraft({ ...targetDraft, unit: u })}
-                  style={{
-                    ...styles.unitToggleBtnSmall,
-                    background: targetDraft.unit === u ? "#E8C547" : "transparent",
-                    color: targetDraft.unit === u ? "#16171A" : "#8A8D93",
-                  }}
-                >
-                  {u}
-                </button>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: "6px" }}>
-              <button onClick={onSaveTarget} style={styles.iconBtnYellowSmall}>
-                <Check size={14} strokeWidth={2.5} />
-              </button>
-              <button onClick={onCancelTarget} style={styles.iconBtnGhostSmall}>
-                <X size={14} strokeWidth={2.5} />
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <button onClick={onEditTarget} style={styles.targetRow}>
-          <span style={styles.targetLabel}>OBJETIVO</span>
-          {hasTarget ? (
-            <span style={styles.targetValue}>
-              {ex.targetWeight || "–"}
-              <span style={styles.unit}>{unit}</span> × {ex.targetReps || "–"}
-              <span style={styles.unit}>reps</span> × {ex.targetSets || "–"}
-              <span style={styles.unit}>series</span>
-            </span>
-          ) : (
-            <span style={styles.targetPlaceholder}>tocar para fijar objetivo</span>
-          )}
-        </button>
-      )}
+      <button onClick={onOpenEdit} style={styles.targetRow}>
+        <span style={styles.targetLabel}>OBJETIVO</span>
+        {hasTarget ? (
+          <span style={styles.targetValue}>
+            <span style={styles.targetNum}>{ex.targetWeight || "–"}</span><span style={styles.unit}>{unit}</span>
+            <span style={styles.targetSep}>×</span>
+            <span style={styles.targetNum}>{ex.targetReps || "–"}</span><span style={styles.unit}>reps</span>
+            <span style={styles.targetSep}>×</span>
+            <span style={styles.targetNum}>{ex.targetSets || "–"}</span><span style={styles.unit}>series</span>
+          </span>
+        ) : (
+          <span style={styles.targetPlaceholder}>tocar para fijar objetivo</span>
+        )}
+      </button>
 
       <div style={styles.logSection}>
         <div style={styles.logHeaderRow}>
@@ -560,12 +770,12 @@ function ExerciseCard({
             <div style={styles.prBadges}>
               {monthlyPR !== null && (
                 <span style={styles.prBadgeGold}>
-                  <Star size={9} fill="#E8C547" color="#E8C547" /> {monthlyPR}{unit}
+                  <Star size={9} fill={C.gold} color={C.gold} /> {monthlyPR}{unit}
                 </span>
               )}
               {globalPR !== null && (
                 <span style={styles.prBadgeCyan}>
-                  <Star size={9} fill="#7DD3E8" color="#7DD3E8" /> {globalPR}{unit}
+                  <Star size={9} fill={C.cyan} color={C.cyan} /> {globalPR}{unit}
                 </span>
               )}
             </div>
@@ -597,16 +807,12 @@ function ExerciseCard({
                           setEditingLogIdx(null);
                           setExpandedLogIdx(null);
                         }}
-                        style={styles.iconBtnDeleteSmall}
+                        style={styles.actionBtnDanger}
                       >
                         <Trash2 size={13} strokeWidth={2.2} />
                       </button>
                     </div>
-                    <SetRows
-                      sets={editDraft.sets}
-                      unit={unit}
-                      onChange={(sets) => setEditDraft({ ...editDraft, sets })}
-                    />
+                    <SetRows sets={editDraft.sets} unit={unit} onChange={(sets) => setEditDraft({ ...editDraft, sets })} />
                     <textarea
                       value={editDraft.note}
                       onChange={(e) => setEditDraft({ ...editDraft, note: e.target.value })}
@@ -615,12 +821,12 @@ function ExerciseCard({
                       style={styles.noteInput}
                     />
                     <div style={styles.logEditActions}>
-                      <button onClick={() => saveLogEdit(idx)} style={styles.iconBtnYellowSmall}>
-                        <Check size={14} strokeWidth={2.5} />
-                        <span style={{ marginLeft: "5px", fontSize: "11px" }}>Guardar</span>
+                      <button onClick={() => preserveScroll(() => saveLogEdit(idx))} style={styles.btnPrimary}>
+                        <Check size={15} strokeWidth={2.5} />
+                        <span>Guardar</span>
                       </button>
-                      <button onClick={() => setEditingLogIdx(null)} style={styles.iconBtnGhostSmall}>
-                        <X size={14} strokeWidth={2.5} />
+                      <button onClick={() => setEditingLogIdx(null)} style={styles.btnGhost}>
+                        <X size={16} strokeWidth={2.5} />
                       </button>
                     </div>
                   </div>
@@ -634,11 +840,11 @@ function ExerciseCard({
                       <div style={styles.logExpandedHeaderLeft}>
                         <span style={styles.logRowDate}>{formatDate(l.date)}</span>
                         <TrendIcon trend={trend} />
-                        {isMonthlyPR && <Star size={11} fill="#E8C547" color="#E8C547" />}
-                        {isGlobalPR && <Star size={11} fill="#7DD3E8" color="#7DD3E8" />}
+                        {isMonthlyPR && <Star size={11} fill={C.gold} color={C.gold} />}
+                        {isGlobalPR && <Star size={11} fill={C.cyan} color={C.cyan} />}
                       </div>
                       <button onClick={() => startEditLog(idx, l)} style={styles.editIconBtn} aria-label="Editar">
-                        <Pencil size={14} color="#E8C547" />
+                        <Pencil size={14} color={C.gold} />
                       </button>
                     </div>
                     <div style={styles.logExpandedSets}>
@@ -664,8 +870,8 @@ function ExerciseCard({
                   <span style={styles.logRowDateGroup}>
                     <span style={styles.logRowDate}>{formatDate(l.date)}</span>
                     <TrendIcon trend={trend} />
-                    {isMonthlyPR && <Star size={10} fill="#E8C547" color="#E8C547" />}
-                    {isGlobalPR && <Star size={10} fill="#7DD3E8" color="#7DD3E8" />}
+                    {isMonthlyPR && <Star size={10} fill={C.gold} color={C.gold} />}
+                    {isGlobalPR && <Star size={10} fill={C.cyan} color={C.cyan} />}
                   </span>
                   <div style={styles.logRowSets}>
                     {l.sets.map((s, si) => (
@@ -703,11 +909,7 @@ function ExerciseCard({
             onChange={(e) => onDraftChange((d) => ({ ...d, date: e.target.value }))}
             style={styles.logEditDate}
           />
-          <SetRows
-            sets={draft.sets}
-            unit={unit}
-            onChange={(sets) => onDraftChange((d) => ({ ...d, sets }))}
-          />
+          <SetRows sets={draft.sets} unit={unit} onChange={(sets) => onDraftChange((d) => ({ ...d, sets }))} />
           <textarea
             value={draft.note}
             onChange={(e) => onDraftChange((d) => ({ ...d, note: e.target.value }))}
@@ -716,19 +918,19 @@ function ExerciseCard({
             style={styles.noteInput}
           />
           <div style={styles.logEditActions}>
-            <button onClick={onSaveNewLog} style={styles.iconBtnYellowSmall}>
-              <Check size={14} strokeWidth={2.5} />
-              <span style={{ marginLeft: "5px", fontSize: "11px" }}>Guardar</span>
+            <button onClick={onSaveNewLog} style={styles.btnPrimary}>
+              <Check size={15} strokeWidth={2.5} />
+              <span>Guardar</span>
             </button>
-            <button onClick={onToggleLog} style={styles.iconBtnGhostSmall}>
-              <X size={14} strokeWidth={2.5} />
+            <button onClick={onToggleLog} style={styles.btnGhost}>
+              <X size={16} strokeWidth={2.5} />
             </button>
           </div>
         </div>
       ) : (
         <button onClick={onToggleLog} style={styles.registerBtn}>
           <span>Registrar</span>
-          <ChevronRight size={15} strokeWidth={2.5} />
+          <ChevronRight size={16} strokeWidth={2.5} />
         </button>
       )}
     </div>
@@ -738,414 +940,317 @@ function ExerciseCard({
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "#16171A",
-    color: "#EDEAE3",
-    fontFamily: "'Oswald', sans-serif",
+    background: C.bg,
+    color: C.textPrimary,
+    fontFamily: FONT_UI,
     paddingBottom: "40px",
   },
   loadingText: {
     padding: "40px 20px",
-    fontFamily: "'JetBrains Mono', monospace",
-    color: "#5A5D63",
+    fontFamily: FONT_NUM,
+    color: C.textMuted,
     letterSpacing: "2px",
     fontSize: "13px",
   },
-  header: { padding: "14px 12px 10px" },
-  headerRow: { display: "flex", alignItems: "center", gap: "9px" },
+
+  topBar: {
+    position: "sticky",
+    top: 0,
+    zIndex: 20,
+    background: "rgba(0,0,0,0.72)",
+    backdropFilter: "blur(20px) saturate(180%)",
+    WebkitBackdropFilter: "blur(20px) saturate(180%)",
+    paddingTop: "env(safe-area-inset-top)",
+    borderBottom: `1px solid ${C.borderSubtle}`,
+  },
+  header: { padding: "12px 14px 10px" },
+  headerRow: { display: "flex", alignItems: "center", gap: "10px" },
   logoBadge: {
     display: "inline-flex",
     alignItems: "center",
     gap: "7px",
-    background: "#E8C547",
-    color: "#16171A",
-    fontFamily: "'JetBrains Mono', monospace",
+    background: C.gold,
+    color: C.goldText,
+    fontFamily: FONT_NUM,
     fontWeight: 700,
-    fontSize: "14.5px",
+    fontSize: "13px",
     letterSpacing: "1.5px",
     padding: "7px 11px",
     borderRadius: "6px",
     lineHeight: 1,
-    border: "1px solid #E8C547",
+  },
+  streakBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
+    fontFamily: FONT_NUM,
+    fontWeight: 700,
+    fontSize: "13px",
+    color: C.textPrimary,
   },
   saveError: {
     display: "block",
-    marginTop: "5px",
-    fontFamily: "'JetBrains Mono', monospace",
+    marginTop: "6px",
+    fontFamily: FONT_NUM,
     fontSize: "9px",
-    color: "#C4664B",
+    color: C.danger,
     letterSpacing: "0.3px",
   },
-  topBar: {
-    position: "fixed",
-    top: 0,
-    left: 0,
-    right: 0,
-    zIndex: 20,
-    background: "#16171A",
-    paddingTop: "env(safe-area-inset-top)",
-    borderBottom: "1px solid #232529",
+
+  dayNavWrap: { display: "flex", gap: "8px", padding: "0 10px 10px", alignItems: "center" },
+  dayNavTrack: {
+    flex: 1,
+    display: "flex",
+    gap: "2px",
+    background: "rgba(120,120,128,0.16)",
+    borderRadius: "9px",
+    padding: "2px",
   },
-  dayNav: { display: "flex", gap: "4px", padding: "0 8px 10px" },
   dayBtn: {
     flex: 1,
-    padding: "8px 2px",
-    borderRadius: "6px",
-    border: "1px solid",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontWeight: 700,
-    fontSize: "10.5px",
+    minHeight: "40px",
+    padding: "0 2px",
+    borderRadius: "7px",
+    border: "none",
+    fontFamily: FONT_NUM,
+    fontWeight: 600,
+    fontSize: "12px",
     letterSpacing: "0.2px",
     cursor: "pointer",
-    transition: "all 0.15s ease",
   },
-  main: {
-    padding: "14px 12px 0",
-    paddingTop: "155px",
-},
-  emptyState: { padding: "36px 8px", textAlign: "center" },
-  emptyBar: { width: "36px", height: "3px", background: "#E8C547", margin: "0 auto 16px", borderRadius: "2px" },
-  emptyText: { color: "#6B6E74", fontSize: "14px", fontFamily: "'Oswald', sans-serif", fontWeight: 400, margin: 0 },
-  card: {
-    background: "#1D1F23",
-    border: "1px solid #2B2D31",
-    borderRadius: "10px",
-    padding: "13px 13px 11px",
-    marginBottom: "10px",
-  },
-  cardTop: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" },
-  exName: { fontSize: "15.5px", fontWeight: 600, letterSpacing: "0.2px" },
-  deleteBtn: { background: "none", border: "none", padding: "4px", cursor: "pointer", display: "flex" },
-  reorderBtn: {
-    background: "none",
-    border: "1px solid #2B2D31",
-    borderRadius: "5px",
-    padding: "3px",
+  editDaysBtn: {
+    flexShrink: 0,
+    width: "36px",
+    minHeight: "40px",
+    background: "rgba(120,120,128,0.16)",
+    border: "none",
+    borderRadius: "9px",
     display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     cursor: "pointer",
-    color: "#8A8D93",
   },
+  editDaysHint: {
+    margin: "0 10px 10px",
+    fontFamily: FONT_UI,
+    fontSize: "11.5px",
+    color: C.textSecondary,
+  },
+
+  main: { padding: "14px 12px 0" },
+  emptyState: { padding: "36px 8px", textAlign: "center" },
+  emptyBar: { width: "36px", height: "3px", background: C.gold, margin: "0 auto 16px", borderRadius: "2px" },
+  emptyText: { color: C.textSecondary, fontSize: "14px", fontFamily: FONT_UI, fontWeight: 400, margin: 0 },
+
+  card: {
+    background: C.card,
+    border: `1px solid ${C.borderSubtle}`,
+    borderRadius: "16px",
+    padding: "14px 14px 12px",
+    marginBottom: "10px",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+  },
+  cardTop: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginBottom: "10px" },
+  exNameBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    background: "none",
+    border: "none",
+    padding: "4px 0",
+    cursor: "pointer",
+    minWidth: 0,
+  },
+  exName: {
+    fontSize: "16.5px",
+    fontWeight: 600,
+    letterSpacing: "0.2px",
+    color: C.textPrimary,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  actionGroup: { display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 },
+  actionBtn: {
+    width: "34px",
+    height: "34px",
+    background: "none",
+    border: "none",
+    borderRadius: "8px",
+    padding: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    color: C.textSecondary,
+    flexShrink: 0,
+  },
+  actionBtnDanger: {
+    width: "34px",
+    height: "34px",
+    background: "none",
+    border: "none",
+    borderRadius: "8px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    color: C.danger,
+    flexShrink: 0,
+  },
+
   targetRow: {
     width: "100%",
-    background: "#16171A",
-    border: "1px solid #2B2D31",
-    borderRadius: "6px",
-    padding: "9px 10px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    cursor: "pointer",
-    marginBottom: "11px",
-    flexWrap: "wrap",
-    gap: "4px",
-  },
-  targetLabel: { fontFamily: "'JetBrains Mono', monospace", fontSize: "9.5px", color: "#E8C547", letterSpacing: "1px" },
-  targetValue: { fontFamily: "'JetBrains Mono', monospace", fontSize: "12.5px", fontWeight: 700, color: "#EDEAE3" },
-  unit: { fontSize: "9.5px", color: "#8A8D93", fontWeight: 400, marginRight: "3px" },
-  targetPlaceholder: { fontFamily: "'JetBrains Mono', monospace", fontSize: "10.5px", color: "#5A5D63" },
-  targetEditBlock: {
-    background: "#16171A",
-    border: "1px solid #2B2D31",
-    borderRadius: "6px",
-    padding: "9px",
-    marginBottom: "11px",
+    background: C.inset,
+    border: `1px solid ${C.borderSubtle}`,
+    borderRadius: "10px",
+    padding: "10px 12px",
     display: "flex",
     flexDirection: "column",
-    gap: "8px",
-  },
-  targetEditRow: { display: "flex", alignItems: "center", gap: "5px" },
-  targetEditFooter: { display: "flex", alignItems: "center", justifyContent: "space-between" },
-  targetInput: {
-    flex: 1,
-    background: "#1D1F23",
-    border: "1px solid #3A3D42",
-    borderRadius: "6px",
-    padding: "8px 6px",
-    color: "#EDEAE3",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "12px",
-    minWidth: 0,
-    width: 0,
-  },
-  targetX: { color: "#5A5D63", fontSize: "12px" },
-  unitToggleSmall: { display: "flex", border: "1px solid #3A3D42", borderRadius: "6px", overflow: "hidden" },
-  unitToggleBtnSmall: {
-    border: "none",
-    padding: "6px 12px",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "10.5px",
-    fontWeight: 700,
+    alignItems: "flex-start",
+    gap: "5px",
     cursor: "pointer",
+    marginBottom: "12px",
   },
-  logSection: { marginBottom: "11px" },
-  logHeaderRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" },
-  logLabel: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "9.5px",
-    color: "#5A5D63",
-    letterSpacing: "0.5px",
-  },
-  prBadges: { display: "flex", gap: "5px" },
-  prBadgeGold: {
-    display: "flex",
-    alignItems: "center",
-    gap: "3px",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "9.5px",
-    fontWeight: 700,
-    color: "#E8C547",
-  },
-  prBadgeCyan: {
-    display: "flex",
-    alignItems: "center",
-    gap: "3px",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "9.5px",
-    fontWeight: 700,
-    color: "#7DD3E8",
-  },
-  noLogs: { fontFamily: "'JetBrains Mono', monospace", fontSize: "11px", color: "#44464B" },
+  targetLabel: { fontFamily: FONT_NUM, fontSize: "10px", color: C.gold, letterSpacing: "1.2px" },
+  targetValue: { display: "flex", alignItems: "baseline", flexWrap: "wrap", fontFamily: FONT_NUM },
+  targetNum: { fontSize: "20px", fontWeight: 700, color: C.textPrimary },
+  targetSep: { color: C.textMuted, fontSize: "13px", margin: "0 7px" },
+  unit: { fontSize: "11px", color: C.textSecondary, fontWeight: 400, marginLeft: "2px" },
+  targetPlaceholder: { fontFamily: FONT_NUM, fontSize: "11px", color: C.textMuted },
+
+  logSection: { marginBottom: "12px" },
+  logHeaderRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "7px" },
+  logLabel: { fontFamily: FONT_NUM, fontSize: "10px", color: C.textMuted, letterSpacing: "0.6px" },
+  prBadges: { display: "flex", gap: "6px" },
+  prBadgeGold: { display: "flex", alignItems: "center", gap: "3px", fontFamily: FONT_NUM, fontSize: "10px", fontWeight: 700, color: C.gold },
+  prBadgeCyan: { display: "flex", alignItems: "center", gap: "3px", fontFamily: FONT_NUM, fontSize: "10px", fontWeight: 700, color: C.cyan },
+  noLogs: { fontFamily: FONT_NUM, fontSize: "11.5px", color: C.textMuted },
+
   logList: { display: "flex", flexDirection: "column", gap: "6px" },
   logRow: {
     width: "100%",
-    background: "#16171A",
-    border: "1px solid #2B2D31",
-    borderRadius: "6px",
-    padding: "8px 10px",
+    background: C.inset,
+    border: `1px solid ${C.borderSubtle}`,
+    borderRadius: "8px",
+    padding: "9px 11px",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     gap: "8px",
     cursor: "pointer",
+    minHeight: "40px",
   },
   logRowDateGroup: { display: "flex", alignItems: "center", gap: "5px", flexShrink: 0 },
-  logRowDate: { fontFamily: "'JetBrains Mono', monospace", fontSize: "10.5px", color: "#5A5D63" },
+  logRowDate: { fontFamily: FONT_NUM, fontSize: "11px", color: C.textSecondary },
   logRowSets: { display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" },
   setBadge: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "11.5px",
-    color: "#C9CACC",
-    fontWeight: 500,
-    background: "#1D1F23",
-    border: "1px solid #2B2D31",
-    borderRadius: "4px",
-    padding: "2px 6px",
-  },
-  chipUnit: { fontSize: "9px", color: "#6B6E74" },
-  logExpandedBlock: {
-    background: "#16171A",
-    border: "1px solid #3A3D42",
+    fontFamily: FONT_NUM,
+    fontSize: "13px",
+    color: C.textPrimary,
+    fontWeight: 600,
+    background: C.card,
+    border: `1px solid ${C.borderSubtle}`,
     borderRadius: "6px",
-    padding: "10px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "8px",
+    padding: "3px 7px",
   },
+  chipUnit: { fontSize: "10px", color: C.textSecondary },
+
+  logExpandedBlock: { background: C.inset, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "11px", display: "flex", flexDirection: "column", gap: "9px" },
   logExpandedHeader: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   logExpandedHeaderLeft: { display: "flex", alignItems: "center", gap: "6px" },
-  editIconBtn: { background: "none", border: "1px solid #3A3D42", borderRadius: "6px", padding: "5px", display: "flex", cursor: "pointer" },
-  logExpandedSets: { display: "flex", flexDirection: "column", gap: "4px" },
-  logExpandedSetRow: { display: "flex", alignItems: "center", gap: "7px" },
-  logExpandedSetValue: { fontFamily: "'JetBrains Mono', monospace", fontSize: "12.5px", color: "#EDEAE3", fontWeight: 500 },
-  noteText: {
-    fontFamily: "'Oswald', sans-serif",
-    fontSize: "12.5px",
-    color: "#9A9DA3",
-    fontStyle: "italic",
-    margin: 0,
-    borderLeft: "2px solid #2B2D31",
-    paddingLeft: "8px",
-  },
-  collapseBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "4px",
-    background: "none",
-    border: "none",
-    color: "#5A5D63",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "10px",
-    cursor: "pointer",
-    padding: "2px",
-  },
+  editIconBtn: { width: "34px", height: "34px", background: "none", border: "none", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+  logExpandedSets: { display: "flex", flexDirection: "column", gap: "5px" },
+  logExpandedSetRow: { display: "flex", alignItems: "center", gap: "8px" },
+  logExpandedSetValue: { fontFamily: FONT_NUM, fontSize: "14px", color: C.textPrimary, fontWeight: 600 },
+  noteText: { fontFamily: FONT_UI, fontSize: "12.5px", color: C.textSecondary, fontStyle: "italic", margin: 0, borderLeft: `2px solid ${C.border}`, paddingLeft: "9px" },
+  collapseBtn: { display: "flex", alignItems: "center", justifyContent: "center", gap: "4px", background: "none", border: "none", color: C.textMuted, fontFamily: FONT_NUM, fontSize: "10.5px", cursor: "pointer", padding: "6px" },
+
   showMoreBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "5px",
-    width: "100%",
-    marginTop: "7px",
-    background: "none",
-    border: "1px dashed #2B2D31",
-    borderRadius: "6px",
-    padding: "6px",
-    color: "#6B6E74",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "10px",
-    cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "5px", width: "100%", marginTop: "8px",
+    background: "none", border: `1px dashed ${C.border}`, borderRadius: "8px", padding: "9px",
+    color: C.textSecondary, fontFamily: FONT_NUM, fontSize: "10.5px", cursor: "pointer", minHeight: "38px",
   },
-  logEditBlock: {
-    background: "#16171A",
-    border: "1px solid #E8C547",
-    borderRadius: "6px",
-    padding: "9px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "8px",
-  },
-  logAddBlock: {
-    background: "#16171A",
-    border: "1px solid #2B2D31",
-    borderRadius: "6px",
-    padding: "9px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "8px",
-  },
+
+  logEditBlock: { background: C.inset, border: `1px solid ${C.gold}`, borderRadius: "10px", padding: "11px", display: "flex", flexDirection: "column", gap: "9px" },
+  logAddBlock: { background: C.inset, border: `1px solid ${C.borderSubtle}`, borderRadius: "10px", padding: "11px", display: "flex", flexDirection: "column", gap: "9px" },
   logEditDateRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" },
   logEditDate: {
-    flex: 1,
-    background: "#1D1F23",
-    border: "1px solid #3A3D42",
-    borderRadius: "5px",
-    padding: "6px 7px",
-    color: "#EDEAE3",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "11.5px",
-    minWidth: 0,
+    flex: 1, background: C.card, border: `1px solid ${C.border}`, borderRadius: "8px",
+    padding: "10px 10px", color: C.textPrimary, fontFamily: FONT_NUM, fontSize: "13px", minWidth: 0, minHeight: "40px",
   },
-  setRowsWrap: { display: "flex", flexDirection: "column", gap: "5px" },
-  setRow: { display: "flex", alignItems: "center", gap: "5px" },
-  setIndex: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "9.5px",
-    color: "#5A5D63",
-    width: "18px",
-    flexShrink: 0,
-  },
+
+  setRowsWrap: { display: "flex", flexDirection: "column", gap: "6px" },
+  setRow: { display: "flex", alignItems: "center", gap: "6px" },
+  setIndex: { fontFamily: FONT_NUM, fontSize: "10px", color: C.textMuted, width: "20px", flexShrink: 0 },
   setInput: {
-    flex: 1,
-    minWidth: 0,
-    width: 0,
-    background: "#1D1F23",
-    border: "1px solid #3A3D42",
-    borderRadius: "5px",
-    padding: "7px 6px",
-    color: "#EDEAE3",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "12px",
-    textAlign: "center",
+    flex: 1, minWidth: 0, width: 0, minHeight: "44px",
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: "8px",
+    padding: "0 8px", color: C.textPrimary, fontFamily: FONT_NUM, fontSize: "15px", fontWeight: 600, textAlign: "center",
   },
   setRemoveBtn: {
-    background: "none",
-    border: "1px solid #3A3D42",
-    borderRadius: "5px",
-    padding: "6px",
-    display: "flex",
-    cursor: "pointer",
-    color: "#6B6E74",
-    flexShrink: 0,
+    width: "34px", height: "34px", background: "none", border: `1px solid ${C.border}`, borderRadius: "8px",
+    display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.textSecondary, flexShrink: 0,
   },
   addSetBtn: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "5px",
-    background: "none",
-    border: "1px dashed #3A3D42",
-    borderRadius: "5px",
-    padding: "6px",
-    color: "#8A8D93",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "10.5px",
-    cursor: "pointer",
-    marginTop: "1px",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", minHeight: "40px",
+    background: "none", border: `1px dashed ${C.borderStrong}`, borderRadius: "8px",
+    color: C.textSecondary, fontFamily: FONT_NUM, fontSize: "11.5px", fontWeight: 600, cursor: "pointer", marginTop: "1px",
   },
+
   noteInput: {
-    background: "#1D1F23",
-    border: "1px solid #3A3D42",
-    borderRadius: "5px",
-    padding: "7px 8px",
-    color: "#EDEAE3",
-    fontFamily: "'Oswald', sans-serif",
-    fontSize: "12px",
-    width: "100%",
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "9px 10px",
+    color: C.textPrimary, fontFamily: FONT_UI, fontSize: "13px", width: "100%",
   },
-  logEditActions: { display: "flex", alignItems: "center", gap: "6px" },
+  logEditActions: { display: "flex", alignItems: "center", gap: "8px" },
+
   registerBtn: {
-    width: "100%",
-    background: "none",
-    border: "1px dashed #3A3D42",
-    borderRadius: "6px",
-    padding: "8px 11px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    color: "#8A8D93",
-    fontFamily: "'Oswald', sans-serif",
-    fontSize: "13px",
-    fontWeight: 500,
-    letterSpacing: "0.3px",
-    cursor: "pointer",
+    width: "100%", minHeight: "46px", background: C.goldTint, border: "none", borderRadius: "12px",
+    padding: "0 14px", display: "flex", alignItems: "center", justifyContent: "space-between",
+    color: C.gold, fontFamily: FONT_UI, fontSize: "14px", fontWeight: 600, letterSpacing: "0.2px", cursor: "pointer",
   },
-  addBlock: {
-    border: "1px solid #2B2D31",
-    borderRadius: "8px",
-    padding: "10px",
-    marginBottom: "14px",
-    display: "flex",
-    flexDirection: "column",
-    gap: "9px",
+
+  // ---- unified exercise form (create + edit) ----
+  exerciseFormBlock: {
+    border: `1px solid ${C.border}`, borderRadius: "14px", padding: "12px",
+    marginBottom: "14px", display: "flex", flexDirection: "column", gap: "9px", background: C.card,
   },
-  addRow: { display: "flex", alignItems: "center", gap: "6px" },
-  addInput: {
-    flex: 1,
-    background: "#1D1F23",
-    border: "1px solid #2B2D31",
-    borderRadius: "8px",
-    padding: "12px 13px",
-    color: "#EDEAE3",
-    fontFamily: "'Oswald', sans-serif",
-    fontSize: "14px",
-    minWidth: 0,
+  exerciseFormBlockInline: {
+    display: "flex", flexDirection: "column", gap: "9px",
   },
-  unitPicker: { display: "flex", alignItems: "center", justifyContent: "space-between" },
-  unitPickerLabel: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "9.5px",
-    color: "#5A5D63",
-    letterSpacing: "1px",
+  formNameInput: {
+    background: C.inset, border: `1px solid ${C.border}`, borderRadius: "9px",
+    padding: "0 13px", minHeight: "46px", color: C.textPrimary, fontFamily: FONT_UI, fontSize: "15px", fontWeight: 500, minWidth: 0, width: "100%",
   },
-  unitToggle: { display: "flex", border: "1px solid #2B2D31", borderRadius: "6px", overflow: "hidden" },
+  formTargetRow: { display: "flex", alignItems: "center", gap: "6px" },
+  formNumInput: {
+    flex: 1, minWidth: 0, width: 0, minHeight: "44px",
+    background: C.inset, border: `1px solid ${C.border}`, borderRadius: "8px",
+    padding: "0 6px", color: C.textPrimary, fontFamily: FONT_NUM, fontSize: "14px", fontWeight: 600, textAlign: "center",
+  },
+  formFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" },
+
+  unitToggle: { display: "flex", border: `1px solid ${C.border}`, borderRadius: "8px", overflow: "hidden" },
   unitToggleBtn: {
-    border: "none",
-    padding: "6px 16px",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: "11px",
-    fontWeight: 700,
-    cursor: "pointer",
+    border: "none", padding: "0 16px", minHeight: "40px",
+    fontFamily: FONT_NUM, fontSize: "12px", fontWeight: 700, cursor: "pointer",
   },
+
   addExerciseBtn: {
-    width: "100%",
-    background: "none",
-    border: "1px solid #2B2D31",
-    borderRadius: "8px",
-    padding: "13px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "8px",
-    color: "#E8C547",
-    fontFamily: "'Oswald', sans-serif",
-    fontSize: "14px",
-    fontWeight: 600,
-    letterSpacing: "0.5px",
-    cursor: "pointer",
-    marginBottom: "14px",
+    width: "100%", minHeight: "48px", background: C.goldTint, border: "none", borderRadius: "14px",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+    color: C.gold, fontFamily: FONT_UI, fontSize: "15px", fontWeight: 600, letterSpacing: "0.2px", cursor: "pointer", marginBottom: "14px",
   },
-  iconBtnYellow: { background: "#E8C547", border: "none", borderRadius: "8px", padding: "12px", display: "flex", cursor: "pointer", color: "#16171A" },
-  iconBtnGhost: { background: "none", border: "1px solid #2B2D31", borderRadius: "8px", padding: "12px", display: "flex", cursor: "pointer", color: "#8A8D93" },
-  iconBtnYellowSmall: { background: "#E8C547", border: "none", borderRadius: "6px", padding: "7px 9px", display: "flex", alignItems: "center", cursor: "pointer", color: "#16171A", flexShrink: 0 },
-  iconBtnGhostSmall: { background: "none", border: "1px solid #3A3D42", borderRadius: "6px", padding: "7px", display: "flex", cursor: "pointer", color: "#8A8D93", flexShrink: 0 },
-  iconBtnDeleteSmall: { background: "none", border: "1px solid #C4664B", borderRadius: "6px", padding: "6px", display: "flex", cursor: "pointer", color: "#C4664B", flexShrink: 0 },
+
+  // ---- shared buttons ----
+  btnPrimary: {
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+    background: C.gold, border: "none", borderRadius: "10px", minHeight: "44px", padding: "0 16px",
+    color: C.goldText, fontFamily: FONT_UI, fontSize: "15px", fontWeight: 600, cursor: "pointer", flex: 1,
+  },
+  btnGhost: {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "rgba(120,120,128,0.16)", border: "none", borderRadius: "10px", minHeight: "44px", width: "44px",
+    color: C.textSecondary, cursor: "pointer", flexShrink: 0,
+  },
 };
